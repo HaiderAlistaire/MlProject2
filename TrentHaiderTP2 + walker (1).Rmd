@@ -1,0 +1,212 @@
+---
+title: "T12-TPII"
+author: "Haider Ali, Walker Campbell, Trenton Carpenter, Ian Dors"
+output:
+  html_document: default
+  pdf_document: default
+---
+## Data Set
+https://www.kaggle.com/c/zillow-prize-1
+
+## Simple Linear Regression Analysis
+https://www.kaggle.com/monkeyorman/simple-linear-regression-in-r-0-0648835
+
+```{r setup, include=FALSE}
+rm(list=ls())
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyr)
+library(ggplot2)
+library(data.table)
+library(dplyr)
+library(ggplot2)
+library(stringr)
+library(DT)
+library(tidyr)
+library(corrplot)
+library(leaflet)
+library(lubridate)
+library(glmnet)
+library(Metrics)
+```
+
+## Import Data -- Haider
+```{r import}
+trainData <- read.csv("train_2016_v2.csv", header = TRUE)   # transactions
+properityData <- read.csv("properties_2016.csv", header = TRUE) # properties
+data <- merge(trainData, properityData, by="parcelid", all.x= TRUE)
+```
+
+## Explore The Data -- Haider
+```{r explorePP}
+str(data)
+summary(data)
+
+#rename for easier understanding
+data <- data %>% rename(
+  id_parcel = parcelid,
+  yearbuilt = yearbuilt,
+  area_basement = basementsqft,
+  area_patio = yardbuildingsqft17,
+  area_shed = yardbuildingsqft26, 
+  area_pool = poolsizesum,  
+  area_lot = lotsizesquarefeet, 
+  area_garage = garagetotalsqft,
+  area_firstfloor_finished = finishedfloor1squarefeet,
+  area_total_calc = calculatedfinishedsquarefeet,
+  area_base = finishedsquarefeet6,
+  area_live_finished = finishedsquarefeet12,
+  area_liveperi_finished = finishedsquarefeet13,
+  area_total_finished = finishedsquarefeet15,  
+  area_unknown = finishedsquarefeet50,
+  num_unit = unitcnt, 
+  num_story = numberofstories,  
+  num_room = roomcnt,
+  num_bathroom = bathroomcnt,
+  num_bedroom = bedroomcnt,
+  num_bathroom_calc = calculatedbathnbr,
+  num_bath = fullbathcnt,  
+  num_75_bath = threequarterbathnbr, 
+  num_fireplace = fireplacecnt,
+  num_pool = poolcnt,  
+  num_garage = garagecarcnt,  
+  region_county = regionidcounty,
+  region_city = regionidcity,
+  region_zip = regionidzip,
+  region_neighbor = regionidneighborhood,  
+  tax_total = taxvaluedollarcnt,
+  tax_building = structuretaxvaluedollarcnt,
+  tax_land = landtaxvaluedollarcnt,
+  tax_property = taxamount,
+  tax_year = assessmentyear,
+  tax_delinquency = taxdelinquencyflag,
+  tax_delinquency_year = taxdelinquencyyear,
+  zoning_property = propertyzoningdesc,
+  zoning_landuse = propertylandusetypeid,
+  zoning_landuse_county = propertycountylandusecode,
+  flag_fireplace = fireplaceflag, 
+  flag_tub = hashottuborspa,
+  quality = buildingqualitytypeid,
+  framing = buildingclasstypeid,
+  material = typeconstructiontypeid,
+  deck = decktypeid,
+  story = storytypeid,
+  heating = heatingorsystemtypeid,
+  aircon = airconditioningtypeid,
+  architectural_style= architecturalstyletypeid  
+)
+
+#add age column
+data$age<- 2016 - data$yearbuilt
+```
+
+
+``` {r plot1}
+#year built
+data %>% 
+  ggplot(aes(x=yearbuilt))+geom_line(stat="density", color="red", size=1.2)+theme_bw()
+```
+
+```{r plot2}
+#log error distribution
+data %>% 
+  ggplot(aes(x=logerror)) + 
+  geom_histogram(bins=400, fill="red")+
+  theme_bw()+theme(axis.title = element_text(size=16),axis.text = element_text(size=14))+
+  ylab("Count")+coord_cartesian(x=c(-0.5,0.5))
+```
+```{r plot3}
+#log error vs livable square footage
+data %>% 
+  ggplot(aes(y=logerror, x=area_live_finished))+geom_line(color="red", size=1.2)+theme_bw()
+```
+```{r plot4}
+#What columns are missing the most?
+missing_values <- data %>% summarize_each(funs(sum(is.na(.))/n()))
+missing_values <- gather(missing_values, key="feature", value="missing_pct")
+missing_values %>% 
+  ggplot(aes(x=reorder(feature,-missing_pct),y=missing_pct)) +
+  geom_bar(stat="identity",fill="red")+
+  coord_flip()+theme_bw()
+```
+
+## Preprocessing - Walker
+```{r pp}
+#remove bad features
+bad_features <- filter(missing_values, missing_pct>0.50)
+list_bad <- bad_features$feature
+list_bad <- append(list_bad,'flag_tub')
+list_bad <- append(list_bad,'propertycountylandusecode')
+list_bad <- append(list_bad,'zoning_landuse_county')
+list_bad <- append(list_bad,'rawcensustractandblock')
+list_bad <- append(list_bad,'flag_fireplace')
+list_bad <- append(list_bad,'tax_year')
+list_bad <- append(list_bad,'censustractandblock')
+list_bad <- append(list_bad,'tax_delinquency')
+list_bad <- append(list_bad,'transactiondate')
+list_bad <- append(list_bad,'fips')
+list_bad <- append(list_bad,'latitude')
+list_bad <- append(list_bad,'longitude')
+list_bad <- append(list_bad,'region_city')
+list_bad <- append(list_bad,'region_county')
+list_bad <- append(list_bad,'region_zip')
+list_bad <- append(list_bad,'zoning_property')
+
+data <- data[,!names(data) %in% list_bad]
+
+#remove nulls
+data <- na.omit(data)
+
+#turn these columns into correct data type
+data$quality <- as.factor(data$quality)
+data$heating <- as.factor(data$heating)
+
+str(data)
+```
+
+### Prep Model - Walker
+```{r model}
+set.seed(2021)
+x <- model.matrix(logerror~., data = data)[,-c(1,2)]
+y <- data$logerror
+
+#split & create train and test
+train <- sample(1:nrow(x),nrow(x)/(4/3))
+test <- (-train)
+x.test <- x[test,]
+y.test <- y[test]
+```
+
+## Create Lasso Model - Walker
+```{r create}
+set.seed(2021)
+#Create a lamba grid vector of 120 elements ranging from 10^10 to 10^-3 
+lambda.grid <- 10^seq(10,-3,length=120)
+
+#create lasso model
+mod.lasso <- glmnet(x[train,], y[train],alpha=1, lambda = lambda.grid)
+
+#Evaluate model performance using cross-validation
+cv.out.lasso <- cv.glmnet(x[train,],y[train],alpha=1,lambda = lambda.grid, nfolds = 10)
+
+#Get the best lambda value
+bestLambda <- cv.out.lasso$lambda.min
+
+#Create predictions
+lasso.pred <- predict(mod.lasso, s=bestLambda, newx=x.test)
+
+#MSE
+mean((lasso.pred-y.test)^2)
+
+#Get coeffeicients for model with best lambda
+lasso.coef <- predict(mod.lasso, s=bestLambda, type='coefficients')
+lasso.coef
+ 
+```
+
+## Conclusion - Trent
+```{r conclusion}
+#.0648835
+# vs
+mae(lasso.pred, y.test)
+```
